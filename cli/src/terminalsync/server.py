@@ -55,7 +55,7 @@ class SessionHandler:
 
             # Register PTY output → WS forwarder
             def on_output(seq: int, data: bytes) -> None:
-                asyncio.ensure_future(self._send_output(seq, data))
+                asyncio.create_task(self._send_output(seq, data))
 
             self._proxy.add_output_callback(on_output)
 
