@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "terminalsync"
+version = "0.1.0"
+description = "Mirror a terminal to your phone — E2E encrypted, peer-to-peer, no daemon"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "aiohttp>=3.9",
+    "PyNaCl>=1.5.0",
+    "cryptography>=42.0",
+    "cbor2>=5.6",
+    "click>=8.1",
+    "qrcode>=7.4",
+]
+
+[project.scripts]
+terminalsync = "terminalsync.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+terminalsync = ["web_client/**/*"]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
