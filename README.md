@@ -25,7 +25,7 @@ pipx install terminalsync
 Or from source:
 
 ```bash
-git clone https://github.com/webmaster@clippingcacd.com.br/terminalsync  # replace with your username
+git clone https://github.com/lucarp/terminalsync
 cd terminalsync/cli
 pip install -e .
 ```
