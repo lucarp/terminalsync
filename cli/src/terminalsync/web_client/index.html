@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>TerminalSync</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.min.css">
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; background: #1a1a1a; color: #ccc; font-family: monospace; overflow: hidden; }
+  #app { display: flex; flex-direction: column; height: 100%; }
+  #header {
+    background: #111; padding: 8px 12px; display: flex; align-items: center;
+    gap: 12px; border-bottom: 1px solid #333; font-size: 13px; flex-shrink: 0;
+  }
+  #header .label { font-weight: bold; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #status-dot { width: 8px; height: 8px; border-radius: 50%; background: #888; flex-shrink: 0; }
+  #status-dot.connected { background: #4caf50; }
+  #status-dot.error { background: #f44336; }
+  #sas-bar {
+    background: #2a2a00; border-bottom: 1px solid #554400; padding: 6px 12px;
+    font-size: 12px; display: none;
+  }
+  #sas-bar.visible { display: block; }
+  #terminal-container { flex: 1; overflow: hidden; padding: 4px; min-height: 0; }
+  #setup-screen {
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    height: 100%; gap: 16px; padding: 24px; text-align: center;
+  }
+  #setup-screen h2 { font-size: 18px; color: #fff; }
+  #setup-screen p { color: #888; font-size: 13px; max-width: 320px; }
+  #setup-note { background: #222; border: 1px solid #444; padding: 10px 14px; border-radius: 6px; font-size: 12px; color: #aaa; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="setup-screen">
+    <h2>TerminalSync</h2>
+    <p>Connecting to terminal…</p>
+    <div id="setup-note">Preparing secure connection</div>
+  </div>
+  <div id="header" style="display:none">
+    <div id="status-dot"></div>
+    <div class="label" id="session-label">terminal</div>
+  </div>
+  <div id="sas-bar">
+    🔐 Verify auth code matches terminal: <strong id="sas-value"></strong>
+  </div>
+  <div id="terminal-container" style="display:none"></div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js"></script>
+<script type="module">
+import sodium_module from 'https://cdn.jsdelivr.net/npm/libsodium-wrappers@0.7.13/dist/modules/libsodium-wrappers.mjs';
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+function b64urlDecode(s) {
+  s = s.replace(/-/g, '+').replace(/_/g, '/');
+  while (s.length % 4) s += '=';
+  return Uint8Array.from(atob(s), c => c.charCodeAt(0));
+}
+
+function b64urlEncode(bytes) {
+  let bin = '';
+  for (const b of bytes) bin += String.fromCharCode(b);
+  return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
+}
+
+// ── Minimal CBOR encode/decode ────────────────────────────────────────────────
+
+function cborDecode(buf) {
+  const view = new DataView(buf.buffer || buf.buffer, buf.byteOffset || 0);
+  let offset = 0;
+
+  function readUint(additional) {
+    if (additional < 24) return additional;
+    if (additional === 24) { return view.getUint8(offset++); }
+    if (additional === 25) { const v = view.getUint16(offset); offset += 2; return v; }
+    if (additional === 26) { const v = view.getUint32(offset); offset += 4; return v; }
+    throw new Error('cbor: unsupported uint size ' + additional);
+  }
+
+  function readItem() {
+    const b = view.getUint8(offset++);
+    const major = b >> 5;
+    const additional = b & 0x1f;
+    if (major === 0) return readUint(additional);
+    if (major === 2) {
+      const len = readUint(additional);
+      const bytes = new Uint8Array(buf.buffer || buf.buffer, (buf.byteOffset || 0) + offset, len);
+      offset += len;
+      return bytes.slice();
+    }
+    if (major === 3) {
+      const len = readUint(additional);
+      const bytes = new Uint8Array(buf.buffer || buf.buffer, (buf.byteOffset || 0) + offset, len);
+      offset += len;
+      return new TextDecoder().decode(bytes);
+    }
+    if (major === 4) { const len = readUint(additional); return Array.from({length: len}, readItem); }
+    if (major === 5) {
+      const len = readUint(additional);
+      const obj = {};
+      for (let i = 0; i < len; i++) { const k = readItem(); obj[k] = readItem(); }
+      return obj;
+    }
+    throw new Error('cbor: unsupported major type ' + major);
+  }
+  return readItem();
+}
+
+function cborEncodeItem(v) {
+  if (typeof v === 'number' && Number.isInteger(v) && v >= 0) {
+    if (v < 24) return [v];
+    if (v < 256) return [0x18, v];
+    if (v < 65536) return [0x19, v >> 8, v & 0xff];
+    return [0x1a, (v>>>24)&0xff, (v>>>16)&0xff, (v>>>8)&0xff, v&0xff];
+  }
+  if (typeof v === 'string') {
+    const enc = new TextEncoder().encode(v);
+    const hdr = enc.length < 24 ? [0x60 | enc.length] : [0x78, enc.length];
+    return [...hdr, ...enc];
+  }
+  if (v instanceof Uint8Array) {
+    const hdr = v.length < 24 ? [0x40 | v.length] : [0x58, v.length];
+    return [...hdr, ...v];
+  }
+  if (Array.isArray(v)) {
+    const hdr = v.length < 24 ? [0x80 | v.length] : [0x98, v.length];
+    return [...hdr, ...v.flatMap(cborEncodeItem)];
+  }
+  throw new Error('cbor: unsupported type ' + typeof v);
+}
+
+function cborEncodeMap(obj) {
+  const entries = Object.entries(obj);
+  const hdr = entries.length < 24 ? [0xa0 | entries.length] : [0xb8, entries.length];
+  return new Uint8Array([...hdr, ...entries.flatMap(([k, v]) => [...cborEncodeItem(k), ...cborEncodeItem(v)])]);
+}
+
+// ── Crypto (libsodium + SubtleCrypto) ────────────────────────────────────────
+
+async function deriveSessionKey(sodium, ourPriv, theirPub, psk) {
+  const dh = sodium.crypto_scalarmult(ourPriv, theirPub);
+  const ikm = new Uint8Array([...dh, ...psk]);
+  const keyMat = await crypto.subtle.importKey('raw', ikm, 'HKDF', false, ['deriveBits']);
+  const info = new TextEncoder().encode('terminalsync-v2-session-key');
+  const bits = await crypto.subtle.deriveBits(
+    { name: 'HKDF', hash: 'SHA-256', salt: new Uint8Array(32), info },
+    keyMat, 256
+  );
+  return new Uint8Array(bits);
+}
+
+async function computeSas(sessionKey) {
+  const prefix = new TextEncoder().encode('terminalsync-sas-v2');
+  const combined = new Uint8Array([...prefix, ...sessionKey]);
+  const hashBuf = await crypto.subtle.digest('SHA-256', combined);
+  const digest = new Uint8Array(hashBuf);
+  const groups = [];
+  for (let i = 0; i < 4; i++) {
+    const val = (digest[i*4]*0x1000000 + digest[i*4+1]*0x10000 + digest[i*4+2]*0x100 + digest[i*4+3]) >>> 0;
+    groups.push(String(val % 1000).padStart(3, '0'));
+  }
+  return groups.join('-');
+}
+
+function encryptFrame(sodium, key, plaintext) {
+  const nonce = sodium.randombytes_buf(sodium.crypto_secretbox_NONCEBYTES);
+  const cipher = sodium.crypto_secretbox_easy(plaintext, nonce, key);
+  const out = new Uint8Array(nonce.length + cipher.length);
+  out.set(nonce); out.set(cipher, nonce.length);
+  return out;
+}
+
+function decryptFrame(sodium, key, data) {
+  const N = sodium.crypto_secretbox_NONCEBYTES;
+  if (data.length < N + sodium.crypto_secretbox_MACBYTES) throw new Error('frame too short');
+  return sodium.crypto_secretbox_open_easy(data.slice(N), data.slice(0, N), key);
+}
+
+// ── Parse ?pair= ──────────────────────────────────────────────────────────────
+
+const params = new URLSearchParams(location.search);
+const pairParam = params.get('pair');
+
+let pairData = null;
+if (pairParam) {
+  try { pairData = JSON.parse(new TextDecoder().decode(b64urlDecode(pairParam))); }
+  catch (e) { document.getElementById('setup-note').textContent = 'Invalid pairing data in URL.'; }
+}
+
+if (!pairData) {
+  document.getElementById('setup-note').textContent = 'No pairing data found. Please scan the QR code from your terminal.';
+  throw new Error('No pair data');
+}
+
+// ── UI ────────────────────────────────────────────────────────────────────────
+
+function showTerminal() {
+  document.getElementById('setup-screen').style.display = 'none';
+  document.getElementById('header').style.display = 'flex';
+  document.getElementById('terminal-container').style.display = 'flex';
+  document.getElementById('terminal-container').style.flexDirection = 'column';
+}
+
+function setStatus(connected) {
+  document.getElementById('status-dot').className = connected ? 'connected' : 'error';
+}
+
+function setLabel(text) {
+  document.getElementById('session-label').textContent = text || 'terminal';
+}
+
+function showSas(sas) {
+  document.getElementById('sas-value').textContent = sas;
+  document.getElementById('sas-bar').className = 'visible';
+}
+
+// ── Main ──────────────────────────────────────────────────────────────────────
+
+setLabel(pairData.label);
+document.getElementById('setup-note').textContent = 'Loading crypto library…';
+
+await sodium_module.ready;
+const sodium = sodium_module;
+
+const serverPub = b64urlDecode(pairData.pub);
+const psk = b64urlDecode(pairData.psk);
+const ourPriv = sodium.randombytes_buf(32);
+const ourPub = sodium.crypto_scalarmult_base(ourPriv);
+
+const term = new Terminal({
+  fontFamily: '"Cascadia Code", "Fira Code", "Courier New", monospace',
+  fontSize: 13,
+  theme: { background: '#1a1a1a', foreground: '#cccccc' },
+  allowProposedApi: true,
+  scrollback: 5000,
+});
+const fitAddon = new FitAddon.FitAddon();
+term.loadAddon(fitAddon);
+term.open(document.getElementById('terminal-container'));
+showTerminal();
+fitAddon.fit();
+window.addEventListener('resize', () => fitAddon.fit());
+
+let sessionKey = null;
+let ws = null;
+
+function connect() {
+  document.getElementById('setup-note').textContent = 'Connecting…';
+  ws = new WebSocket(pairData.endpoint);
+  ws.binaryType = 'arraybuffer';
+
+  ws.onopen = async () => {
+    ws.send(b64urlEncode(ourPub));
+    sessionKey = await deriveSessionKey(sodium, ourPriv, serverPub, psk);
+    const sas = await computeSas(sessionKey);
+    showSas(sas);
+    setStatus(true);
+    // Request replay of buffered output
+    ws.send(encryptFrame(sodium, sessionKey, cborEncodeMap({t: 'replay', from_seq: 0})));
+    // Send hello
+    ws.send(encryptFrame(sodium, sessionKey, cborEncodeMap({
+      t: 'hello',
+      label: pairData.label || '',
+      device: navigator.userAgent.slice(0, 60),
+      caps: ['resize'],
+    })));
+  };
+
+  ws.onmessage = (e) => {
+    if (!sessionKey) return;
+    const data = new Uint8Array(e.data);
+    try {
+      const plain = decryptFrame(sodium, sessionKey, data);
+      const msg = cborDecode(plain);
+      if (msg.t === 'output') term.write(msg.data);
+      else if (msg.t === 'ping') ws.send(encryptFrame(sodium, sessionKey, cborEncodeMap({t: 'pong', seq: msg.seq})));
+      else if (msg.t === 'bye') ws.close();
+    } catch(err) { console.warn('frame error', err); }
+  };
+
+  ws.onclose = () => {
+    setStatus(false);
+    sessionKey = null;
+    setTimeout(connect, 3000);
+  };
+
+  ws.onerror = () => ws.close();
+}
+
+term.onData(data => {
+  if (ws && ws.readyState === WebSocket.OPEN && sessionKey) {
+    ws.send(encryptFrame(sodium, sessionKey, cborEncodeMap({
+      t: 'input',
+      data: new TextEncoder().encode(data),
+    })));
+  }
+});
+
+term.onResize(({cols, rows}) => {
+  if (ws && ws.readyState === WebSocket.OPEN && sessionKey) {
+    ws.send(encryptFrame(sodium, sessionKey, cborEncodeMap({t: 'resize', cols, rows})));
+  }
+});
+
+connect();
+</script>
+</body>
+</html>
