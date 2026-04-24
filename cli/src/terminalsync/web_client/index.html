@@ -22,7 +22,9 @@
     font-size: 12px; display: none;
   }
   #sas-bar.visible { display: block; }
-  #terminal-container { flex: 1; overflow: hidden; padding: 4px; min-height: 0; }
+  #terminal-container { flex: 1; overflow: hidden; padding: 4px; min-height: 0; touch-action: none; }
+  #terminal-container .xterm { touch-action: none; }
+  #terminal-container .xterm-viewport { touch-action: none; overflow-y: scroll !important; }
   #setup-screen {
     display: flex; flex-direction: column; align-items: center; justify-content: center;
     height: 100%; gap: 16px; padding: 24px; text-align: center;
@@ -245,6 +247,19 @@ term.open(document.getElementById('terminal-container'));
 showTerminal();
 fitAddon.fit();
 window.addEventListener('resize', () => fitAddon.fit());
+
+// Forward touch scroll events to xterm.js on mobile
+(function() {
+  const el = document.getElementById('terminal-container');
+  let startY = 0;
+  el.addEventListener('touchstart', e => { startY = e.touches[0].clientY; }, { passive: true });
+  el.addEventListener('touchmove', e => {
+    const dy = startY - e.touches[0].clientY;
+    startY = e.touches[0].clientY;
+    term.scrollLines(Math.round(dy / term.options.lineHeight / 20));
+    e.preventDefault();
+  }, { passive: false });
+})();
 
 let sessionKey = null;
 let ws = null;
