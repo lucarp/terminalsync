@@ -19,6 +19,12 @@ Built for leaving AI coding agents (Claude Code, etc.) running at home while sta
 ## Install
 
 ```bash
+curl -fsSL https://raw.githubusercontent.com/lucarp/terminalsync/master/install.sh | bash
+```
+
+Or manually with pipx:
+
+```bash
 pipx install git+https://github.com/lucarp/terminalsync.git#subdirectory=cli
 ```
 
