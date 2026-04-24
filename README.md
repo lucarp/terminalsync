@@ -2,6 +2,8 @@
 
 **Mirror a terminal to your phone — E2E encrypted, peer-to-peer, no daemon.**
 
+![TerminalSync demo](docs/demo.gif)
+
 Run `terminalsync` in any terminal tab. Scan the QR code with your phone. See your terminal, live, in your browser. Close the tab and everything shuts down — no background process, no cloud relay, no stored keys.
 
 Built for leaving AI coding agents (Claude Code, etc.) running at home while staying able to observe and intervene from anywhere.
