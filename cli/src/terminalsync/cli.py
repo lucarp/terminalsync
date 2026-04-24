@@ -3,6 +3,7 @@ import os
 import signal
 import socket
 import sys
+from urllib.parse import urlparse
 
 import click
 
@@ -39,18 +40,22 @@ def _get_default_ip() -> str:
     "--command", default=None,
     help="Command to run inside PTY (default: $SHELL)",
 )
+@click.option(
+    "--public-url", default=None, envvar="TERMINALSYNC_PUBLIC_URL",
+    help="Public URL for QR code (e.g. ngrok/cloudflared URL). Overrides --host/--port in QR.",
+)
 @click.version_option()
-def main(host: str | None, port: int, command: str | None) -> None:
+def main(host: str | None, port: int, command: str | None, public_url: str | None) -> None:
     """Mirror a terminal to your phone — E2E encrypted, no daemon."""
     assert_interactive_terminal()
 
     cmd = command.split() if command else [os.environ.get("SHELL", "/bin/bash")]
     bind_host = host or _get_default_ip()
 
-    asyncio.run(_run(bind_host, port, cmd))
+    asyncio.run(_run(bind_host, port, cmd, public_url))
 
 
-async def _run(host: str, port: int, cmd: list[str]) -> None:
+async def _run(host: str, port: int, cmd: list[str], public_url: str | None = None) -> None:
     status = StatusLine()
 
     privkey, pubkey = generate_keypair()
@@ -66,7 +71,16 @@ async def _run(host: str, port: int, cmd: list[str]) -> None:
     app = build_app(session, proxy, status)
     runner, actual_port = await start_server(app, ssl_ctx, "0.0.0.0", port)
 
-    payload = build_payload(sid, label, host, actual_port, pubkey, psk, cert_der)
+    # Advertised host/port may differ from bind address when behind a tunnel (ngrok, cloudflared).
+    if public_url:
+        parsed = urlparse(public_url)
+        adv_host = parsed.hostname or host
+        adv_port = parsed.port or (443 if parsed.scheme in ("https", "wss") else 80)
+    else:
+        adv_host = host
+        adv_port = actual_port
+
+    payload = build_payload(sid, label, adv_host, adv_port, pubkey, psk, cert_der)
     url = payload_to_url(payload)
     qr_str = render_qr_terminal(url)
 
