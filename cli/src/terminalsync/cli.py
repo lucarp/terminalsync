@@ -69,7 +69,9 @@ async def _run(host: str, port: int, cmd: list[str], public_url: str | None = No
     session = Session(sid=sid, label=label, pubkey=pubkey, privkey=privkey, psk=psk)
 
     app = build_app(session, proxy, status)
-    runner, actual_port = await start_server(app, ssl_ctx, "0.0.0.0", port)
+    # When behind a tunnel, the tunnel provides TLS — bind plain HTTP locally.
+    effective_ssl = None if public_url else ssl_ctx
+    runner, actual_port = await start_server(app, effective_ssl, "0.0.0.0", port)
 
     # Advertised host/port may differ from bind address when behind a tunnel (ngrok, cloudflared).
     if public_url:
