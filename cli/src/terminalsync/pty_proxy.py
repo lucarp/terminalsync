@@ -90,8 +90,10 @@ class PtyProxy:
                 data = os.read(sys.stdin.fileno(), 256)
                 if data and self._master_fd >= 0:
                     os.write(self._master_fd, data)
+                elif not data:  # EOF — terminal closed
+                    self._done.set()
             except OSError:
-                pass
+                self._done.set()
 
         loop.add_reader(self._master_fd, on_pty_readable)
         if self._mirror_local:

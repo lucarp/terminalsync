@@ -40,12 +40,14 @@ def build_payload(
     pubkey: bytes,
     psk: bytes,
     cert_der: bytes,
+    tls: bool = True,
 ) -> QrPayload:
+    ws_scheme = "wss" if tls else "ws"
     return QrPayload(
         v=2,
         sid=sid,
         label=label,
-        endpoint=f"wss://{host}:{port}/s/{sid}",
+        endpoint=f"{ws_scheme}://{host}:{port}/s/{sid}",
         pub=base64.urlsafe_b64encode(pubkey).decode().rstrip("="),
         psk=base64.urlsafe_b64encode(psk).decode().rstrip("="),
         fpr=hashlib.sha256(cert_der).hexdigest()[:16],
@@ -66,8 +68,8 @@ def payload_to_url(p: QrPayload) -> str:
     encoded = base64.urlsafe_b64encode(
         json.dumps(obj, separators=(",", ":")).encode()
     ).decode().rstrip("=")
-    https_base = p.endpoint.replace("wss://", "https://").split("/s/")[0]
-    return f"{https_base}/?pair={encoded}"
+    base = p.endpoint.replace("wss://", "https://").replace("ws://", "http://").split("/s/")[0]
+    return f"{base}/?pair={encoded}"
 
 
 def render_qr_terminal(data: str) -> str:

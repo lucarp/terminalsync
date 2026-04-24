@@ -78,11 +78,13 @@ async def _run(host: str, port: int, cmd: list[str], public_url: str | None = No
         parsed = urlparse(public_url)
         adv_host = parsed.hostname or host
         adv_port = parsed.port or (443 if parsed.scheme in ("https", "wss") else 80)
+        adv_tls = parsed.scheme in ("https", "wss")
     else:
         adv_host = host
         adv_port = actual_port
+        adv_tls = True
 
-    payload = build_payload(sid, label, adv_host, adv_port, pubkey, psk, cert_der)
+    payload = build_payload(sid, label, adv_host, adv_port, pubkey, psk, cert_der, tls=adv_tls)
     url = payload_to_url(payload)
     qr_str = render_qr_terminal(url)
 
